@@ -3,12 +3,13 @@ from scipy.interpolate import interp1d
 
 class SED_Fitting():
     def __init__(self,data,template,filter_funs,
-                 band_keys,band_to_filter,filter_keys):
+                 band_keys,band_to_filter,band_to_err,filter_keys):
         self.data=data
         self.template=template
         self.filter_funs=filter_funs
         self.band_keys=band_keys
         self.band_to_filter=band_to_filter
+        self.band_to_err=band_to_err
         self.filter_keys=filter_keys
         self.filter_norms={}
         self.con_fr_sed={}
@@ -21,9 +22,17 @@ class SED_Fitting():
     def logl2_(self,y,y0):
         b=np.mean(np.log10(y)-np.log10(y0))
         return np.mean((np.log10(y)-np.log10(y0)-b)**2)
-    def logl2_b_(self,y,y0):
+    def logl2_a_(self,y,y0):
         b=np.mean(np.log10(y)-np.log10(y0))
-        return np.mean((np.log10(y)-np.log10(y0)-b)**2),b
+        return np.mean((np.log10(y)-np.log10(y0)-b)**2),10**b
+    def l2_err_(self,y,y0,err):
+        y,y0,err=np.asarray(y),np.asarray(y0),np.asarray(err)
+        a=np.sum(y0*y/err**2)/np.sum(y0**2/err**2)
+        return np.mean(((y-y0*a)/err)**2)
+    def l2_err_a_(self,y,y0,err):
+        y,y0,err=np.asarray(y),np.asarray(y0),np.asarray(err)
+        a=np.sum(y0*y/err**2)/np.sum(y0**2/err**2)
+        return np.mean(((y-y0*a)/err)**2),a
     def sed_z_(self,z,z_0):
         sed_0=self.sed_0
         sed={}
@@ -45,6 +54,7 @@ class SED_Fitting():
             Y[k]=np.array([data[k][i] for i in range(data['ID'].shape[0])])
         Y['band_names']=[[] for i in range(data['ID'].shape[0])]
         Y['filter_names']=[[] for i in range(data['ID'].shape[0])]
+        Y['err_names']=[[] for i in range(data['ID'].shape[0])]
         Y['data']=[{} for i in range(data['ID'].shape[0])]
         for i in range(data['ID'].shape[0]):
             dat=data[i]
@@ -52,6 +62,7 @@ class SED_Fitting():
                 if(not(np.isnan(dat[bn]) or dat[bn]<=0)):
                     Y['band_names'][i].append(bn)
                     Y['filter_names'][i].append(self.band_to_filter[bn])
+                    Y['err_names'][i].append(self.band_to_err[bn])
                     Y['data'][i][bn]=dat[bn]
     def fitting_(self,dat,sed,filter_names,band_names):
         sed_x2Fx=self.sed_to_func(sed)
@@ -63,7 +74,7 @@ class SED_Fitting():
             #print(fn,norm,tmp,)
             y0.append(fr.convolve_with_function(sed_x2Fx)/norm)
             y.append(dat[bn])
-        return self.logl2_b_(y,y0)
+        return self.logl2_a_(y,y0)
     def compute_(self):
         Y=self.Y
         template=self.template
@@ -89,7 +100,15 @@ class SED_Fitting():
         for fn,bn in zip(filter_names,band_names):
             y0.append(con_fr_sed[fn](z))
             y.append(dat[bn])
-        return self.logl2_b_(y,y0)
+        return self.logl2_a_(y,y0)
+    def fitting_z_err_(self,dat,z,filter_names,band_names,err_names):
+        y,y0,err=[],[],[]
+        con_fr_sed=self.con_fr_sed
+        for fn,bn,en in zip(filter_names,band_names,err_names):
+            y0.append(con_fr_sed[fn](z))
+            y.append(dat[bn])
+            err.append(dat[en])
+        return self.l2_err_a_(y,y0,err=err)
     def con_fr_sed_z_(self):
         sed_0=self.sed_0
         filter_norms=self.filter_norms
@@ -97,9 +116,9 @@ class SED_Fitting():
         for k in self.filter_keys:
             fr=self.filter_funs[k]
             norm=filter_norms[k]=fr.convolve_with_function(self.ref_x2Fx)
-            zs=np.linspace(0,3,300)
-            flxs=np.zeros(300)
-            for i in range(300):
+            zs=np.linspace(0,10,1000)
+            flxs=np.zeros(1000)
+            for i in range(1000):
                 sed=self.sed_z_(z=zs[i],z_0=0.0)
                 sed_x2Fx=self.sed_to_func(sed)
                 flxs[i]=fr.convolve_with_function(sed_x2Fx)/norm
@@ -116,9 +135,22 @@ class SED_Fitting():
             self.metrics[i],self.norms[i]=self.fitting_z_(dat,z=Y['z_best'][i],
                                 filter_names=Y['filter_names'][i],
                                 band_names=Y['band_names'][i])
+    def compute_z_err_(self):
+        Y=self.Y
+        template=self.template
+        self.metrics=np.ones(Y['ID'].shape[0])
+        self.norms=np.ones(Y['ID'].shape[0])
+        for i in range(Y['ID'].shape[0]):
+            dat=self.data[i]#Y['data'][i]
+            sed=self.sed_z_(z=Y['z_best'][i],z_0=0.0)
+            self.metrics[i],self.norms[i]=self.fitting_z_err_(dat,z=Y['z_best'][i],
+                                filter_names=Y['filter_names'][i],
+                                band_names=Y['band_names'][i],
+                                err_names=Y['err_names'][i])
+
 class SED_estimator():
     def __init__(self,data,templates,filter_funs,
-                 band_keys,band_to_filter,filter_keys):
+                 band_keys,band_to_filter,band_to_err,filter_keys):
         self.data=data
         self.templates=templates
         self.template_0=self.templates[:2,:]
@@ -126,6 +158,7 @@ class SED_estimator():
 
         self.band_keys=band_keys
         self.band_to_filter=band_to_filter
+        self.band_to_err=band_to_err
         self.filter_keys=filter_keys
         
         self.metrics_best=np.ones(data['ID'].shape[0])+1e10
@@ -134,7 +167,7 @@ class SED_estimator():
         self.sed_fittings=[]
         self.l_edds=np.zeros(0)
         
-    def sampling(self,l_edds):
+    def sampling(self,l_edds,error=True):
         data=self.data
         self.l_edds=np.sort(np.concatenate((self.l_edds,l_edds)))
         for i in range(len(l_edds)):
@@ -144,11 +177,15 @@ class SED_estimator():
             template[0]=self.templates[0]
             template[1]=self.templates[1]+l_edd*self.templates[2]
             self.sed_fittings.append(SED_Fitting(data=self.data,template=template,filter_funs=self.filter_funs,
-                                                 band_keys=self.band_keys,band_to_filter=self.band_to_filter,filter_keys=self.filter_keys))
+                                                 band_keys=self.band_keys,band_to_filter=self.band_to_filter,
+                                                 band_to_err=self.band_to_err,filter_keys=self.filter_keys))
             sed_fitting=self.sed_fittings[-1]
             sed_fitting.config()
             sed_fitting.con_fr_sed_z_()
-            sed_fitting.compute_z_()
+            if(error):
+                sed_fitting.compute_z_err_()
+            else:
+                sed_fitting.compute_z_()
             metrics,norms=sed_fitting.metrics,sed_fitting.norms
             for j in range(data['ID'].shape[0]):
                 if(metrics[j]<self.metrics_best[j]):
